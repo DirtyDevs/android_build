@@ -525,6 +525,13 @@ ifdef BOARD_KERNEL_PAGESIZE
   INTERNAL_BOOTIMAGE_ARGS += --pagesize $(BOARD_KERNEL_PAGESIZE)
 endif
 
+INSTALLED_DTIMAGE_TARGET := $(PRODUCT_OUT)/dt.img
+
+ifeq ($(strip $(BOARD_KERNEL_SEPARATED_DT)),true)
+  INTERNAL_BOOTIMAGE_ARGS += --dt $(INSTALLED_DTIMAGE_TARGET)
+  BOOTIMAGE_EXTRA_DEPS    := $(INSTALLED_DTIMAGE_TARGET)
+endif
+
 INSTALLED_BOOTIMAGE_TARGET := $(PRODUCT_OUT)/boot.img
 
 ifeq ($(TARGET_BOOTIMAGE_USE_EXT2),true)
@@ -550,7 +557,7 @@ else ifndef BOARD_CUSTOM_BOOTIMG_MK
 
   ifeq (true,$(PRODUCTS.$(INTERNAL_PRODUCT).PRODUCT_SUPPORTS_VBOOT)) # PRODUCT_SUPPORTS_BOOT_SIGNER != true
 
-$(INSTALLED_BOOTIMAGE_TARGET): $(MKBOOTIMG) $(INTERNAL_BOOTIMAGE_FILES) $(VBOOT_SIGNER)
+$(INSTALLED_BOOTIMAGE_TARGET): $(MKBOOTIMG) $(INTERNAL_BOOTIMAGE_FILES) $(VBOOT_SIGNER) $(BOOTIMAGE_EXTRA_DEPS)
 	$(call pretty,"Target boot image: $@")
 	$(hide) $(MKBOOTIMG) $(INTERNAL_BOOTIMAGE_ARGS) $(BOARD_MKBOOTIMG_ARGS) --output $@.unsigned
 	$(VBOOT_SIGNER) $(FUTILITY) $@.unsigned $(PRODUCTS.$(INTERNAL_PRODUCT).PRODUCT_VBOOT_SIGNING_KEY).vbpubk $(PRODUCTS.$(INTERNAL_PRODUCT).PRODUCT_VBOOT_SIGNING_KEY).vbprivk $@.keyblock $@
@@ -565,7 +572,7 @@ bootimage-nodeps: $(MKBOOTIMG) $(VBOOT_SIGNER)
 
   else # PRODUCT_SUPPORTS_VBOOT != true
 
-$(INSTALLED_BOOTIMAGE_TARGET): $(MKBOOTIMG) $(INTERNAL_BOOTIMAGE_FILES)
+$(INSTALLED_BOOTIMAGE_TARGET): $(MKBOOTIMG) $(INTERNAL_BOOTIMAGE_FILES) $(BOOTIMAGE_EXTRA_DEPS)
 	$(call pretty,"Target boot image: $@")
 	$(hide) $(MKBOOTIMG) $(INTERNAL_BOOTIMAGE_ARGS) $(BOARD_MKBOOTIMG_ARGS) --output $@
 	$(hide) $(call assert-max-image-size,$@,$(BOARD_BOOTIMAGE_PARTITION_SIZE))
@@ -891,6 +898,10 @@ BOARD_KERNEL_PAGESIZE := $(strip $(BOARD_KERNEL_PAGESIZE))
 ifdef BOARD_KERNEL_PAGESIZE
   INTERNAL_RECOVERYIMAGE_ARGS += --pagesize $(BOARD_KERNEL_PAGESIZE)
 endif
+ifeq ($(strip $(BOARD_KERNEL_SEPARATED_DT)),true)
+  INTERNAL_RECOVERYIMAGE_ARGS += --dt $(INSTALLED_DTIMAGE_TARGET)
+  RECOVERYIMAGE_EXTRA_DEPS    := $(INSTALLED_DTIMAGE_TARGET)
+endif
 
 # Keys authorized to sign OTA packages this build will accept.  The
 # build always uses dev-keys for this; release packaging tools will
@@ -939,7 +950,7 @@ define build-recoveryimage-target
           > $(TARGET_RECOVERY_ROOT_OUT)/default.prop
   $(hide) $(MKBOOTFS) -d $(TARGET_OUT) $(TARGET_RECOVERY_ROOT_OUT) | $(MINIGZIP) > $(recovery_ramdisk)
 
-  $(if $(filter $(BOARD_CUSTOM_BOOTIMG_MK),),
+  $(if !$(BOARD_CUSTOM_BOOTIMG_MK),
     $(if $(filter true,$(PRODUCTS.$(INTERNAL_PRODUCT).PRODUCT_SUPPORTS_VBOOT)), \
       $(hide) $(MKBOOTIMG) $(INTERNAL_RECOVERYIMAGE_ARGS) $(BOARD_MKBOOTIMG_ARGS) --output $(1).unsigned, \
       $(hide) $(MKBOOTIMG) $(INTERNAL_RECOVERYIMAGE_ARGS) $(BOARD_MKBOOTIMG_ARGS) --output $(1) --id > $(RECOVERYIMAGE_ID_FILE))
@@ -955,7 +966,7 @@ $(recovery_uncompressed_ramdisk): $(MINIGZIP) $(recovery_ramdisk)
 	@echo -e ${CL_CYN}"----- Making uncompressed recovery ramdisk ------"${CL_RST}
 	$(MKBOOTFS) $(TARGET_RECOVERY_ROOT_OUT) > $@
 
-$(recovery_ramdisk): $(MKBOOTFS) $(MKBOOTIMG) $(MINIGZIP) $(RECOVERYIMAGE_EXTRA_DEPS) \
+$(recovery_ramdisk): $(MKBOOTFS) $(MINIGZIP) \
 		$(INSTALLED_RAMDISK_TARGET) \
 		$(INSTALLED_BOOTIMAGE_TARGET) \
 		$(INTERNAL_RECOVERYIMAGE_FILES) \
@@ -966,8 +977,9 @@ $(recovery_ramdisk): $(MKBOOTFS) $(MKBOOTIMG) $(MINIGZIP) $(RECOVERYIMAGE_EXTRA_
 		$(RECOVERY_INSTALL_OTA_KEYS)
 
 ifndef BOARD_CUSTOM_BOOTIMG_MK
-$(INSTALLED_RECOVERYIMAGE_TARGET): $(MKBOOTIMG) $(recovery_ramdisk) $(recovery_kernel)
-				$(call build-recoveryimage-target, $@)
+$(INSTALLED_RECOVERYIMAGE_TARGET): $(MKBOOTIMG) $(recovery_ramdisk) $(recovery_kernel) \
+		$(RECOVERYIMAGE_EXTRA_DEPS)
+	$(call build-recoveryimage-target, $@)
 endif # BOARD_CUSTOM_BOOTIMG_MK
 
 recovery_patch_path := $(call intermediates-dir-for,PACKAGING,recovery_patch)
@@ -1030,8 +1042,10 @@ endif
 	$(hide) cp -r $(PRODUCT_OUT)/boot.img $(ota_temp_root)/BOOTABLE_IMAGES/
 	$(hide) cp -r $(PRODUCT_OUT)/recovery.img $(ota_temp_root)/BOOTABLE_IMAGES/
 	$(hide) ./build/tools/releasetools/make_recovery_patch $(ota_temp_root) $(ota_temp_root)
-	$(hide) cp --remove-destination $(ota_temp_root)/SYSTEM/bin/install-recovery.sh $(TARGET_OUT)/bin/install-recovery.sh
-	$(hide) cp --remove-destination $(ota_temp_root)/SYSTEM/recovery-from-boot.p $(TARGET_OUT)/recovery-from-boot.p
+	$(hide) rm -f $(TARGET_OUT)/bin/install-recovery.sh
+	$(hide) rm -f $(TARGET_OUT)/recovery-from-boot.p
+	$(hide) cp $(ota_temp_root)/SYSTEM/bin/install-recovery.sh $(TARGET_OUT)/bin/install-recovery.sh
+	$(hide) cp $(ota_temp_root)/SYSTEM/recovery-from-boot.p $(TARGET_OUT)/recovery-from-boot.p
 
 $(RECOVERY_RESOURCE_ZIP): $(INSTALLED_RECOVERYIMAGE_TARGET)
 	$(hide) mkdir -p $(dir $@)
@@ -1604,6 +1618,15 @@ endif
 ifdef BOARD_KERNEL_PAGESIZE
 	$(hide) echo "$(BOARD_KERNEL_PAGESIZE)" > $(zip_root)/RECOVERY/pagesize
 endif
+ifdef BOARD_KERNEL_TAGS_ADDR
+	$(hide) echo "$(BOARD_KERNEL_TAGS_ADDR)" > $(zip_root)/RECOVERY/tagsaddr
+endif
+ifdef BOARD_RAMDISK_OFFSET
+	$(hide) echo "$(BOARD_RAMDISK_OFFSET)" > $(zip_root)/RECOVERY/ramdisk_offset
+endif
+ifeq ($(strip $(BOARD_KERNEL_SEPARATED_DT)),true)
+	$(hide) echo "$(INSTALLED_DTIMAGE_TARGET)" > $(zip_root)/RECOVERY/dt_args
+endif
 	@# Components of the boot image
 	$(hide) mkdir -p $(zip_root)/BOOT
 	$(hide) $(call package_files-copy-root, \
@@ -1627,6 +1650,15 @@ ifdef BOARD_KERNEL_BASE
 endif
 ifdef BOARD_KERNEL_PAGESIZE
 	$(hide) echo "$(BOARD_KERNEL_PAGESIZE)" > $(zip_root)/BOOT/pagesize
+endif
+ifdef BOARD_KERNEL_TAGS_ADDR
+	$(hide) echo "$(BOARD_KERNEL_TAGS_ADDR)" > $(zip_root)/BOOT/tagsaddr
+endif
+ifdef BOARD_RAMDISK_OFFSET
+	$(hide) echo "$(BOARD_RAMDISK_OFFSET)" > $(zip_root)/BOOT/ramdisk_offset
+endif
+ifeq ($(strip $(BOARD_KERNEL_SEPARATED_DT)),true)
+	$(hide) echo "$(INSTALLED_DTIMAGE_TARGET)" > $(zip_root)/BOOT/dt_args
 endif
 ifdef ZIP_SAVE_UBOOTIMG_ARGS
 	$(hide) echo "$(ZIP_SAVE_UBOOTIMG_ARGS)" > $(zip_root)/BOOT/ubootargs
